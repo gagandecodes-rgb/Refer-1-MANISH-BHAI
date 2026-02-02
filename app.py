@@ -19,8 +19,14 @@ from telegram.ext import (
     filters,
 )
 
-# ---------------- ENV ----------------
+# =========================================================
+# ENV
+# =========================================================
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBot").strip()  # without @
+PORT = int(os.getenv("PORT") or "10000")
+
 ADMIN_IDS = [int(x.strip()) for x in (os.getenv("ADMIN_IDS") or "").split(",") if x.strip().isdigit()]
 
 DB_HOST = (os.getenv("DB_HOST") or "").strip()
@@ -29,13 +35,11 @@ DB_NAME = (os.getenv("DB_NAME") or "postgres").strip()
 DB_USER = (os.getenv("DB_USER") or "").strip()
 DB_PASS = (os.getenv("DB_PASS") or "").strip()
 
-BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBot").strip()  # without @
-PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
-PORT = int(os.getenv("PORT") or "10000")
 
 def must_env(name: str, v: str):
     if not v:
         raise RuntimeError(f"Missing ENV: {name}")
+
 
 must_env("BOT_TOKEN", BOT_TOKEN)
 must_env("PUBLIC_BASE_URL", PUBLIC_BASE_URL)
@@ -43,11 +47,14 @@ must_env("DB_HOST", DB_HOST)
 must_env("DB_USER", DB_USER)
 must_env("DB_PASS", DB_PASS)
 
-# ---------------- DB ----------------
+# =========================================================
+# DB helpers
+# =========================================================
 def db_conn():
     return psycopg2.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
     )
+
 
 def db_exec(query: str, params: tuple = (), fetchone=False, fetchall=False):
     with db_conn() as conn:
@@ -59,15 +66,20 @@ def db_exec(query: str, params: tuple = (), fetchone=False, fetchall=False):
                 return cur.fetchall()
             return None
 
+
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
-# ---------------- Settings ----------------
+
+# =========================================================
+# settings (force channels + redeem rules)
+# =========================================================
 def get_setting(key: str, default):
     row = db_exec("select value from settings where key=%s", (key,), fetchone=True)
     if not row:
         return default
     return row["value"]
+
 
 def set_setting(key: str, value):
     db_exec(
@@ -78,15 +90,17 @@ def set_setting(key: str, value):
         (key, json.dumps(value, ensure_ascii=False)),
     )
 
+
 def get_force_channels() -> List[str]:
     default = ["@channel1", "@channel2", "@channel3", "@channel4", "@channel5"]
     val = get_setting("force_join_channels", default)
     if isinstance(val, list):
-        out = [str(x) for x in val][:5]
+        out = [str(x).strip() for x in val][:5]
         while len(out) < 5:
             out.append("")
         return out
     return default
+
 
 def get_redeem_rules() -> Dict[str, Dict[str, int]]:
     default = {
@@ -103,7 +117,19 @@ def get_redeem_rules() -> Dict[str, Dict[str, int]]:
         return val
     return default
 
-# ---------------- Users ----------------
+
+def coupon_label(t: str) -> str:
+    return {
+        "500": "500 off 500",
+        "1000": "1000 off 1000",
+        "2000": "2000 off 2000",
+        "4000": "4000 off 4000",
+    }.get(t, t)
+
+
+# =========================================================
+# users
+# =========================================================
 def upsert_user(uid: int, username: Optional[str], first_name: Optional[str]):
     db_exec(
         """
@@ -117,8 +143,10 @@ def upsert_user(uid: int, username: Optional[str], first_name: Optional[str]):
         (uid, username, first_name),
     )
 
+
 def get_user(uid: int) -> Optional[Dict[str, Any]]:
     return db_exec("select * from users where tg_id=%s", (uid,), fetchone=True)
+
 
 def set_state(uid: int, state: Optional[str], state_data: Optional[Dict[str, Any]] = None):
     db_exec(
@@ -126,17 +154,22 @@ def set_state(uid: int, state: Optional[str], state_data: Optional[Dict[str, Any
         (state, json.dumps(state_data, ensure_ascii=False) if state_data else None, uid),
     )
 
+
 def clear_state(uid: int):
     set_state(uid, None, None)
 
+
 def safe_name(u: Dict[str, Any]) -> str:
     if u.get("first_name"):
-        return u["first_name"]
+        return str(u["first_name"])
     if u.get("username"):
-        return "@" + u["username"]
+        return "@" + str(u["username"])
     return str(u.get("tg_id", ""))
 
-# ---------------- Referral ----------------
+
+# =========================================================
+# referral (award ONLY after verified)
+# =========================================================
 def set_referred_by_if_needed(new_uid: int, ref_uid: int):
     if new_uid == ref_uid:
         return
@@ -145,15 +178,14 @@ def set_referred_by_if_needed(new_uid: int, ref_uid: int):
         return
     db_exec("update users set referred_by=%s where tg_id=%s", (ref_uid, new_uid))
 
+
 def award_referral_if_applicable(new_uid: int) -> Optional[int]:
-    """
-    Award +1 point only when new user verified,
-    and only once.
-    """
     u = get_user(new_uid)
     if not u or not u.get("verified") or u.get("referral_awarded") or not u.get("referred_by"):
         return None
+
     ref = int(u["referred_by"])
+
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -165,7 +197,10 @@ def award_referral_if_applicable(new_uid: int) -> Optional[int]:
             cur.execute("update users set points=points+1, referrals=referrals+1 where tg_id=%s", (ref,))
     return ref
 
-# ---------------- Force join check ----------------
+
+# =========================================================
+# force join check (bot must be admin in channels)
+# =========================================================
 async def check_force_join(app: Application, uid: int) -> Tuple[bool, List[str], List[str]]:
     channels = get_force_channels()
     not_joined = []
@@ -178,19 +213,14 @@ async def check_force_join(app: Application, uid: int) -> Tuple[bool, List[str],
             if mem.status in ("left", "kicked"):
                 not_joined.append(ch)
         except Exception:
-            # if bot isn't admin in channel, treat as not joined
+            # If bot not admin / cannot check, treat as not joined
             not_joined.append(ch)
     return (len(not_joined) == 0, channels, not_joined)
 
-# ---------------- Coupons ----------------
-def coupon_label(t: str) -> str:
-    return {
-        "500": "500 off 500",
-        "1000": "1000 off 1000",
-        "2000": "2000 off 2000",
-        "4000": "4000 off 4000",
-    }.get(t, t)
 
+# =========================================================
+# coupons
+# =========================================================
 def stock_counts() -> Dict[str, int]:
     out = {}
     for t in ["500", "1000", "2000", "4000"]:
@@ -201,6 +231,7 @@ def stock_counts() -> Dict[str, int]:
         )
         out[t] = int(row["c"]) if row else 0
     return out
+
 
 def add_coupons(t: str, codes: List[str]) -> int:
     if t not in ["500", "1000", "2000", "4000"]:
@@ -216,6 +247,7 @@ def add_coupons(t: str, codes: List[str]) -> int:
                     (t, code),
                 )
     return len(cleaned)
+
 
 def remove_unused_coupons(t: str, count: int) -> int:
     if t not in ["500", "1000", "2000", "4000"] or count <= 0:
@@ -236,9 +268,11 @@ def remove_unused_coupons(t: str, count: int) -> int:
             )
             return cur.rowcount
 
+
 def redeem_coupon(uid: int, t: str) -> Tuple[bool, str, int]:
     if t not in ["500", "1000", "2000", "4000"]:
         return (False, "Invalid option.", 0)
+
     u = get_user(uid)
     if not u:
         return (False, "User not found.", 0)
@@ -247,6 +281,7 @@ def redeem_coupon(uid: int, t: str) -> Tuple[bool, str, int]:
 
     rules = get_redeem_rules()
     need = int(rules.get(t, {}).get("points", 999999))
+
     if int(u.get("points", 0)) < need:
         return (False, f"Not enough points.\nRequired: {need}\nYou have: {u.get('points', 0)}", 0)
 
@@ -277,11 +312,15 @@ def redeem_coupon(uid: int, t: str) -> Tuple[bool, str, int]:
             )
     return (True, code, need)
 
-# ---------------- Web Verification (1 device = 1 tg) ----------------
+
+# =========================================================
+# web verification (1 device = 1 tg id)
+# =========================================================
 def create_verify_token(uid: int) -> str:
     token = secrets.token_urlsafe(24)
     db_exec("update users set verify_token=%s where tg_id=%s", (token, uid))
     return token
+
 
 def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]:
     token = (token or "").strip()
@@ -295,12 +334,12 @@ def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]
 
     tg_id = int(u["tg_id"])
 
-    # device already used by another tg
+    # device already used by another tg id
     d = db_exec("select tg_id from device_verifications where device_id=%s", (device_id,), fetchone=True)
     if d and int(d["tg_id"]) != tg_id:
         return (False, "This device is already verified with another account.", tg_id)
 
-    # tg already locked to different device
+    # tg id already locked to another device
     d2 = db_exec("select device_id from device_verifications where tg_id=%s", (tg_id,), fetchone=True)
     if d2 and str(d2.get("device_id")) != device_id:
         return (False, "This Telegram ID is already verified on a different device.", tg_id)
@@ -316,9 +355,13 @@ def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]
                 """,
                 (device_id, tg_id),
             )
+
     return (True, "Verified successfully. Now go back and click Check Verification.", tg_id)
 
-# ---------------- UI ----------------
+
+# =========================================================
+# UI
+# =========================================================
 def user_menu(uid: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("✅ Verify", callback_data="verify"), InlineKeyboardButton("📊 Stats", callback_data="stats")],
@@ -328,6 +371,7 @@ def user_menu(uid: int) -> InlineKeyboardMarkup:
     if is_admin(uid):
         rows.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
     return InlineKeyboardMarkup(rows)
+
 
 def admin_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -340,12 +384,14 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Back", callback_data="back_menu")],
     ])
 
+
 def admin_choose_type_kb(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("500", callback_data=f"{prefix}:500"), InlineKeyboardButton("1000", callback_data=f"{prefix}:1000")],
         [InlineKeyboardButton("2000", callback_data=f"{prefix}:2000"), InlineKeyboardButton("4000", callback_data=f"{prefix}:4000")],
         [InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")],
     ])
+
 
 def join_verify_kb(channels: List[str], verify_url: str) -> InlineKeyboardMarkup:
     rows = []
@@ -358,6 +404,7 @@ def join_verify_kb(channels: List[str], verify_url: str) -> InlineKeyboardMarkup
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_menu")])
     return InlineKeyboardMarkup(rows)
 
+
 def welcome_text(uid: int) -> str:
     link = f"https://t.me/{BOT_USERNAME}?start={uid}"
     return (
@@ -365,6 +412,7 @@ def welcome_text(uid: int) -> str:
         "✅ Join all channels → Verify on website → Check Verification\n\n"
         f"🔗 Your Referral Link:\n<code>{link}</code>"
     )
+
 
 def stats_text(uid: int) -> str:
     u = get_user(uid) or {}
@@ -378,6 +426,7 @@ def stats_text(uid: int) -> str:
         f"🔗 Referral Link:\n<code>{link}</code>"
     )
 
+
 def admin_panel_text() -> str:
     channels = get_force_channels()
     rules = get_redeem_rules()
@@ -387,21 +436,23 @@ def admin_panel_text() -> str:
         if c:
             txt += f"{i}) <code>{c}</code>\n"
     txt += "\n⚙️ <b>Redeem Points</b>:\n"
-    for t in ["500","1000","2000","4000"]:
+    for t in ["500", "1000", "2000", "4000"]:
         txt += f"• {coupon_label(t)} = <b>{int(rules[t]['points'])}</b> pts\n"
     txt += "\n📦 <b>Stock</b>:\n"
-    for t in ["500","1000","2000","4000"]:
-        txt += f"• {coupon_label(t)} = <b>{stock.get(t,0)}</b>\n"
+    for t in ["500", "1000", "2000", "4000"]:
+        txt += f"• {coupon_label(t)} = <b>{stock.get(t, 0)}</b>\n"
     return txt
 
-# ---------------- Handlers ----------------
+
+# =========================================================
+# Telegram handlers
+# =========================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     upsert_user(uid, update.effective_user.username, update.effective_user.first_name)
 
     if context.args and context.args[0].isdigit():
-        ref = int(context.args[0])
-        set_referred_by_if_needed(uid, ref)
+        set_referred_by_if_needed(uid, int(context.args[0]))
 
     await update.message.reply_text(
         welcome_text(uid),
@@ -410,13 +461,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
 
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     upsert_user(uid, update.effective_user.username, update.effective_user.first_name)
+
     u = get_user(uid) or {}
     state = u.get("state")
     state_data = u.get("state_data")
-
     if isinstance(state_data, str):
         try:
             state_data = json.loads(state_data)
@@ -425,26 +477,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
 
-    if state == "admin_set_channels" and is_admin(uid):
+    if is_admin(uid) and state == "admin_set_channels":
         lines = [x.strip() for x in text.splitlines() if x.strip()]
         if len(lines) < 5:
-            await update.message.reply_text("Send 5 lines:\n<code>@ch1\n@ch2\n@ch3\n@ch4\n@ch5</code>", parse_mode="HTML")
+            await update.message.reply_text(
+                "Send 5 lines:\n<code>@ch1\n@ch2\n@ch3\n@ch4\n@ch5</code>",
+                parse_mode="HTML",
+            )
             return
-        channels = []
+        chs = []
         for ln in lines[:5]:
             if not ln.startswith("@"):
                 ln = "@" + ln
-            channels.append(ln)
-        set_setting("force_join_channels", channels)
+            chs.append(ln)
+        set_setting("force_join_channels", chs)
         clear_state(uid)
         await update.message.reply_text("✅ Channels updated!", parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
-    if state == "admin_set_rule_points" and is_admin(uid):
+    if is_admin(uid) and state == "admin_set_rule_points":
         t = (state_data or {}).get("type")
         num = "".join([c for c in text if c.isdigit()])
-        if not num:
-            await update.message.reply_text("Send number only (example: 3)")
+        if not num or t not in ["500", "1000", "2000", "4000"]:
+            await update.message.reply_text("Send a number only (example: 3)")
             return
         rules = get_redeem_rules()
         rules[t]["points"] = max(0, int(num))
@@ -453,18 +508,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Points updated!", parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
-    if state == "admin_add_coupons" and is_admin(uid):
+    if is_admin(uid) and state == "admin_add_coupons":
         t = (state_data or {}).get("type")
         codes = [x.strip() for x in text.splitlines() if x.strip()]
+        if t not in ["500", "1000", "2000", "4000"] or not codes:
+            await update.message.reply_text("Send coupon codes (one per line).")
+            return
         n = add_coupons(t, codes)
         clear_state(uid)
         await update.message.reply_text(f"✅ Added {n} coupons to {coupon_label(t)}", parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
-    if state == "admin_remove_coupons" and is_admin(uid):
+    if is_admin(uid) and state == "admin_remove_coupons":
         t = (state_data or {}).get("type")
         num = "".join([c for c in text if c.isdigit()])
-        if not num:
+        if t not in ["500", "1000", "2000", "4000"] or not num:
             await update.message.reply_text("Send number (example: 10)")
             return
         deleted = remove_unused_coupons(t, max(1, int(num)))
@@ -474,10 +532,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Choose an option 👇", reply_markup=user_menu(uid))
 
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     upsert_user(uid, q.from_user.username, q.from_user.first_name)
+
     data = q.data or ""
     await q.answer()
 
@@ -489,6 +549,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         all_joined, channels, _ = await check_force_join(context.application, uid)
         token = create_verify_token(uid)
         verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
+
         if not all_joined:
             await q.edit_message_text(
                 "⚠️ <b>Join all channels first.</b>\n\nThen verify on website and click Check Verification.",
@@ -496,6 +557,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=join_verify_kb(channels, verify_url),
             )
             return
+
         await q.edit_message_text(
             "✅ <b>Joined all channels!</b>\n\nNow verify on website and then click Check Verification.",
             parse_mode="HTML",
@@ -505,6 +567,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "check_verification":
         all_joined, channels, _ = await check_force_join(context.application, uid)
+
         token = create_verify_token(uid)
         verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
 
@@ -536,7 +599,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await q.edit_message_text("✅ <b>Verification Successful!</b>\n\nNow you can use the bot.", parse_mode="HTML", reply_markup=user_menu(uid))
+        await q.edit_message_text(
+            "✅ <b>Verification Successful!</b>\n\nNow you can use the bot.",
+            parse_mode="HTML",
+            reply_markup=user_menu(uid),
+        )
         return
 
     if data == "stats":
@@ -559,7 +626,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             for i, r in enumerate(rows, start=1):
                 name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else str(r["tg_id"]))
-                txt += f"{i}) <b>{name}</b> — Referrals: <b>{int(r.get('referrals',0))}</b>\n"
+                txt += f"{i}) <b>{name}</b> — Referrals: <b>{int(r.get('referrals', 0))}</b>\n"
         await q.edit_message_text(txt, parse_mode="HTML", reply_markup=user_menu(uid))
         return
 
@@ -568,13 +635,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not u.get("verified"):
             await q.answer("Verify first", show_alert=True)
             return
+
         rules = get_redeem_rules()
         stock = stock_counts()
         pts = int(u.get("points", 0))
+
         txt = "🎟️ <b>Redeem Coupons</b>\n\n"
         txt += f"Your Points: <b>{pts}</b>\n\n"
-        for t in ["500","1000","2000","4000"]:
-            txt += f"• {coupon_label(t)} — Need <b>{int(rules[t]['points'])}</b> — Stock <b>{stock.get(t,0)}</b>\n"
+        for t in ["500", "1000", "2000", "4000"]:
+            txt += f"• {coupon_label(t)} — Need <b>{int(rules[t]['points'])}</b> — Stock <b>{stock.get(t, 0)}</b>\n"
+
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("500 off 500", callback_data="redeem:500"),
              InlineKeyboardButton("1000 off 1000", callback_data="redeem:1000")],
@@ -587,31 +657,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("redeem:"):
         t = data.split(":", 1)[1]
-        ok, info, spent = redeem_coupon(uid, t)
+        ok, code, spent = redeem_coupon(uid, t)
         if not ok:
-            await q.answer(info, show_alert=True)
+            await q.answer(code, show_alert=True)
             return
+
         await q.edit_message_text(
             "🎉 <b>Congratulations!</b>\n\n"
-            f"Your Coupon: <code>{info}</code>\n"
+            f"Your Coupon: <code>{code}</code>\n"
             f"Points spent: <b>{spent}</b>",
             parse_mode="HTML",
             reply_markup=user_menu(uid),
         )
-        # notify admins about redeem
+
+        # notify admins
         u = get_user(uid) or {}
         for aid in ADMIN_IDS:
             try:
                 await context.application.bot.send_message(
                     chat_id=aid,
-                    text=f"🎟️ Redeem: {safe_name(u)} ({uid}) got {coupon_label(t)} (spent {spent})",
+                    text=f"🎟️ <b>Redeem</b>\nUser: <b>{safe_name(u)}</b> (<code>{uid}</code>)\nType: <b>{coupon_label(t)}</b>\nSpent: <b>{spent}</b>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
         return
 
-    # --- Admin ---
+    # ---------------- Admin Panel ----------------
     if data == "admin_panel":
         if not is_admin(uid):
             await q.answer("Not allowed", show_alert=True)
@@ -629,13 +701,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "admin_rules" and is_admin(uid):
-        await q.edit_message_text("Select coupon type to change points:", parse_mode="HTML", reply_markup=admin_choose_type_kb("admin_rule"))
+        await q.edit_message_text(
+            "Select coupon type to change points:",
+            parse_mode="HTML",
+            reply_markup=admin_choose_type_kb("admin_rule"),
+        )
         return
 
     if data.startswith("admin_rule:") and is_admin(uid):
         t = data.split(":", 1)[1]
         set_state(uid, "admin_set_rule_points", {"type": t})
-        await q.edit_message_text(f"Send new points for {coupon_label(t)} (example 3):", parse_mode="HTML", reply_markup=admin_panel_kb())
+        await q.edit_message_text(
+            f"Send new points for {coupon_label(t)} (example: <code>3</code>)",
+            parse_mode="HTML",
+            reply_markup=admin_panel_kb(),
+        )
         return
 
     if data == "admin_add_coupons" and is_admin(uid):
@@ -645,7 +725,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("admin_add:") and is_admin(uid):
         t = data.split(":", 1)[1]
         set_state(uid, "admin_add_coupons", {"type": t})
-        await q.edit_message_text(f"Send codes for {coupon_label(t)} one per line:", parse_mode="HTML", reply_markup=admin_panel_kb())
+        await q.edit_message_text(
+            f"Send codes for {coupon_label(t)} (one per line):",
+            parse_mode="HTML",
+            reply_markup=admin_panel_kb(),
+        )
         return
 
     if data == "admin_remove_coupons" and is_admin(uid):
@@ -655,14 +739,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("admin_rem:") and is_admin(uid):
         t = data.split(":", 1)[1]
         set_state(uid, "admin_remove_coupons", {"type": t})
-        await q.edit_message_text(f"Send how many unused coupons to remove from {coupon_label(t)}:", parse_mode="HTML", reply_markup=admin_panel_kb())
+        await q.edit_message_text(
+            f"Send how many unused coupons to remove from {coupon_label(t)} (example: 10):",
+            parse_mode="HTML",
+            reply_markup=admin_panel_kb(),
+        )
         return
 
     if data == "admin_stock" and is_admin(uid):
         stock = stock_counts()
         txt = "📦 <b>Stock</b>\n\n"
-        for t in ["500","1000","2000","4000"]:
-            txt += f"• {coupon_label(t)} = <b>{stock.get(t,0)}</b>\n"
+        for t in ["500", "1000", "2000", "4000"]:
+            txt += f"• {coupon_label(t)} = <b>{stock.get(t, 0)}</b>\n"
         await q.edit_message_text(txt, parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
@@ -670,19 +758,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = db_exec(
             """
             select r.tg_id, r.coupon_type, r.points_spent, u.username, u.first_name
-            from redeems r left join users u on u.tg_id=r.tg_id
-            order by r.id desc limit 20
+            from redeems r
+            left join users u on u.tg_id=r.tg_id
+            order by r.id desc
+            limit 20
             """,
             fetchall=True,
         ) or []
         txt = "📜 <b>Last 20 Redeems</b>\n\n"
-        for r in rows:
-            name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else str(r["tg_id"]))
-            txt += f"• <b>{name}</b> — {coupon_label(str(r['coupon_type']))} — spent <b>{int(r['points_spent'])}</b>\n"
+        if not rows:
+            txt += "No redeems yet."
+        else:
+            for r in rows:
+                name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else str(r["tg_id"]))
+                txt += f"• <b>{name}</b> — {coupon_label(str(r['coupon_type']))} — spent <b>{int(r['points_spent'])}</b>\n"
         await q.edit_message_text(txt, parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
-# ---------------- FastAPI web + Telegram webhook ----------------
+
+# =========================================================
+# FastAPI app + routes
+# =========================================================
 app = FastAPI()
 tg_app: Optional[Application] = None
 
@@ -753,13 +849,16 @@ VERIFY_HTML = """<!doctype html>
 </html>
 """
 
+
 @app.get("/", response_class=PlainTextResponse)
 def health():
     return "OK"
 
+
 @app.get("/verify", response_class=HTMLResponse)
 def verify_page(token: str = ""):
     return HTMLResponse(VERIFY_HTML)
+
 
 @app.post("/api/verify")
 async def api_verify(req: Request):
@@ -769,26 +868,36 @@ async def api_verify(req: Request):
     ok, message, tg_id = verify_on_web(token, device_id)
     return JSONResponse({"ok": ok, "message": message, "tg_id": tg_id})
 
+
 @app.post("/telegram")
 async def telegram_webhook(req: Request):
+    # IMPORTANT: Return quickly. Process update via PTB.
     data = await req.json()
     update = Update.de_json(data, tg_app.bot)  # type: ignore
     await tg_app.process_update(update)        # type: ignore
     return JSONResponse({"ok": True})
 
+
+# =========================================================
+# startup/shutdown
+# =========================================================
 async def build_telegram():
     global tg_app
     tg_app = Application.builder().token(BOT_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", start_cmd))
     tg_app.add_handler(CallbackQueryHandler(on_callback))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
     await tg_app.initialize()
+    # set webhook to correct URL
     await tg_app.bot.set_webhook(f"{PUBLIC_BASE_URL}/telegram")
     await tg_app.start()
+
 
 @app.on_event("startup")
 async def on_startup():
     await build_telegram()
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -796,6 +905,10 @@ async def on_shutdown():
         await tg_app.stop()
         await tg_app.shutdown()
 
+
+# =========================================================
+# IMPORTANT FIX: uvicorn.run(app, ...) not "app:app"
+# =========================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
