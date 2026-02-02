@@ -74,7 +74,7 @@ def is_admin(uid: int) -> bool:
 # =========================================================
 # settings (4 channels)
 # =========================================================
-FORCE_JOIN_COUNT = 4  # ✅ only 4 channels
+FORCE_JOIN_COUNT = 3  # ✅ only 4 channels
 
 
 def get_setting(key: str, default):
@@ -95,7 +95,7 @@ def set_setting(key: str, value):
 
 
 def get_force_channels() -> List[str]:
-    default = ["@channel1", "@channel2", "@channel3", "@channel4"]
+    default = ["@channel1", "@channel2", "@channel3"]
     val = get_setting("force_join_channels", default)
 
     if isinstance(val, list):
