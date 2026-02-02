@@ -95,7 +95,7 @@ def set_setting(key: str, value):
 
 
 def get_force_channels() -> List[str]:
-    default = ["@zenith_scripter", "@scriptersssssji", "@shein_pro_link"]
+    default = ["@channel1", "@channel2", "@channel3"]
     val = get_setting("force_join_channels", default)
 
     if isinstance(val, list):
