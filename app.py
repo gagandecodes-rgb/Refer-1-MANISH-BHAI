@@ -72,8 +72,11 @@ def is_admin(uid: int) -> bool:
 
 
 # =========================================================
-# settings (force channels + redeem rules)
+# settings (4 channels)
 # =========================================================
+FORCE_JOIN_COUNT = 4  # ✅ only 4 channels
+
+
 def get_setting(key: str, default):
     row = db_exec("select value from settings where key=%s", (key,), fetchone=True)
     if not row:
@@ -92,13 +95,15 @@ def set_setting(key: str, value):
 
 
 def get_force_channels() -> List[str]:
-    default = ["@channel1", "@channel2", "@channel3", "@channel4", "@channel5"]
+    default = ["@channel1", "@channel2", "@channel3", "@channel4"]
     val = get_setting("force_join_channels", default)
+
     if isinstance(val, list):
-        out = [str(x).strip() for x in val][:5]
-        while len(out) < 5:
+        out = [str(x).strip() for x in val][:FORCE_JOIN_COUNT]
+        while len(out) < FORCE_JOIN_COUNT:
             out.append("")
         return out
+
     return default
 
 
@@ -168,7 +173,7 @@ def safe_name(u: Dict[str, Any]) -> str:
 
 
 # =========================================================
-# referral (award ONLY after verified)
+# referral award ONLY after verified
 # =========================================================
 def set_referred_by_if_needed(new_uid: int, ref_uid: int):
     if new_uid == ref_uid:
@@ -199,7 +204,7 @@ def award_referral_if_applicable(new_uid: int) -> Optional[int]:
 
 
 # =========================================================
-# force join check (bot must be admin in channels)
+# force join check (4 channels)
 # =========================================================
 async def check_force_join(app: Application, uid: int) -> Tuple[bool, List[str], List[str]]:
     channels = get_force_channels()
@@ -213,7 +218,6 @@ async def check_force_join(app: Application, uid: int) -> Tuple[bool, List[str],
             if mem.status in ("left", "kicked"):
                 not_joined.append(ch)
         except Exception:
-            # If bot not admin / cannot check, treat as not joined
             not_joined.append(ch)
     return (len(not_joined) == 0, channels, not_joined)
 
@@ -314,7 +318,7 @@ def redeem_coupon(uid: int, t: str) -> Tuple[bool, str, int]:
 
 
 # =========================================================
-# web verification (1 device = 1 tg id)
+# web verification (device lock)
 # =========================================================
 def create_verify_token(uid: int) -> str:
     token = secrets.token_urlsafe(24)
@@ -328,18 +332,16 @@ def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]
     if not token or not device_id:
         return (False, "Missing token/device.", None)
 
-    u = db_exec("select tg_id, verified from users where verify_token=%s", (token,), fetchone=True)
+    u = db_exec("select tg_id from users where verify_token=%s", (token,), fetchone=True)
     if not u:
         return (False, "Invalid or expired token.", None)
 
     tg_id = int(u["tg_id"])
 
-    # device already used by another tg id
     d = db_exec("select tg_id from device_verifications where device_id=%s", (device_id,), fetchone=True)
     if d and int(d["tg_id"]) != tg_id:
         return (False, "This device is already verified with another account.", tg_id)
 
-    # tg id already locked to another device
     d2 = db_exec("select device_id from device_verifications where tg_id=%s", (tg_id,), fetchone=True)
     if d2 and str(d2.get("device_id")) != device_id:
         return (False, "This Telegram ID is already verified on a different device.", tg_id)
@@ -356,60 +358,57 @@ def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]
                 (device_id, tg_id),
             )
 
-    return (True, "Verified successfully. Now go back and click Check Verification.", tg_id)
+    return (True, "Verified successfully. Now go back to Telegram and click Check Verification.", tg_id)
 
 
 # =========================================================
-# UI
+# Keyboards
 # =========================================================
+def kb_join_channels(channels: List[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for ch in channels:
+        ch = ch.strip()
+        if ch:
+            rows.append([InlineKeyboardButton(f"Join {ch}", url="https://t.me/" + ch.lstrip("@"))])
+    rows.append([InlineKeyboardButton("✅ Joined All Channels", callback_data="joined_all")])
+    return InlineKeyboardMarkup(rows)
+
+
+def kb_verify_actions(verify_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔐 Verify", url=verify_url)],
+        [InlineKeyboardButton("✅ Check Verification", callback_data="check_verification")],
+    ])
+
+
 def user_menu(uid: int) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("✅ Verify", callback_data="verify"), InlineKeyboardButton("📊 Stats", callback_data="stats")],
-        [InlineKeyboardButton("🎟️ Redeem", callback_data="redeem_menu"), InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
-        [InlineKeyboardButton("🔗 Referral Link", callback_data="ref_link")],
+        [InlineKeyboardButton("📊 Stats", callback_data="stats"),
+         InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
+        [InlineKeyboardButton("🎟️ Redeem", callback_data="redeem_menu"),
+         InlineKeyboardButton("🔗 Referral Link", callback_data="ref_link")],
     ]
     if is_admin(uid):
         rows.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
     return InlineKeyboardMarkup(rows)
 
 
-def admin_panel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Change Force-Join Channels", callback_data="admin_channels")],
-        [InlineKeyboardButton("⚙️ Change Redeem Points", callback_data="admin_rules")],
-        [InlineKeyboardButton("➕ Add Coupons", callback_data="admin_add_coupons"),
-         InlineKeyboardButton("➖ Remove Coupons", callback_data="admin_remove_coupons")],
-        [InlineKeyboardButton("📦 Coupons Stock", callback_data="admin_stock"),
-         InlineKeyboardButton("📜 Redeems Log", callback_data="admin_redeems")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_menu")],
-    ])
+# =========================================================
+# Text builders
+# =========================================================
+def join_text() -> str:
+    return "📢 <b>Join these channels first</b>\n\nAfter joining, click <b>✅ Joined All Channels</b>."
 
 
-def admin_choose_type_kb(prefix: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("500", callback_data=f"{prefix}:500"), InlineKeyboardButton("1000", callback_data=f"{prefix}:1000")],
-        [InlineKeyboardButton("2000", callback_data=f"{prefix}:2000"), InlineKeyboardButton("4000", callback_data=f"{prefix}:4000")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="admin_panel")],
-    ])
-
-
-def join_verify_kb(channels: List[str], verify_url: str) -> InlineKeyboardMarkup:
-    rows = []
-    for ch in channels:
-        ch = ch.strip()
-        if ch:
-            rows.append([InlineKeyboardButton(f"Join {ch}", url="https://t.me/" + ch.lstrip("@"))])
-    rows.append([InlineKeyboardButton("🔐 Verify on Web", url=verify_url)])
-    rows.append([InlineKeyboardButton("✅ Check Verification", callback_data="check_verification")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_menu")])
-    return InlineKeyboardMarkup(rows)
+def verify_text() -> str:
+    return "✅ <b>Great!</b>\nNow verify on website:\n\n1) Click <b>🔐 Verify</b>\n2) Complete verification\n3) Come back and click <b>✅ Check Verification</b>"
 
 
 def welcome_text(uid: int) -> str:
     link = f"https://t.me/{BOT_USERNAME}?start={uid}"
     return (
         "🎉 <b>WELCOME!</b>\n\n"
-        "✅ Join all channels → Verify on website → Check Verification\n\n"
+        "Use the menu below 👇\n\n"
         f"🔗 Your Referral Link:\n<code>{link}</code>"
     )
 
@@ -423,29 +422,13 @@ def stats_text(uid: int) -> str:
         f"Status: <b>{verified}</b>\n"
         f"Points: <b>{int(u.get('points', 0))}</b>\n"
         f"Referrals: <b>{int(u.get('referrals', 0))}</b>\n\n"
-        f"🔗 Referral Link:\n<code>{link}</code>"
+        f"🔗 Referral Link:\n<code>{link}</code>\n\n"
+        "⚠️ Referrals count only after the joined user verifies."
     )
 
 
-def admin_panel_text() -> str:
-    channels = get_force_channels()
-    rules = get_redeem_rules()
-    stock = stock_counts()
-    txt = "🛠 <b>Admin Panel</b>\n\n📢 <b>Force-Join Channels</b>:\n"
-    for i, c in enumerate(channels, start=1):
-        if c:
-            txt += f"{i}) <code>{c}</code>\n"
-    txt += "\n⚙️ <b>Redeem Points</b>:\n"
-    for t in ["500", "1000", "2000", "4000"]:
-        txt += f"• {coupon_label(t)} = <b>{int(rules[t]['points'])}</b> pts\n"
-    txt += "\n📦 <b>Stock</b>:\n"
-    for t in ["500", "1000", "2000", "4000"]:
-        txt += f"• {coupon_label(t)} = <b>{stock.get(t, 0)}</b>\n"
-    return txt
-
-
 # =========================================================
-# Telegram handlers
+# Telegram handlers (flow)
 # =========================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -454,10 +437,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         set_referred_by_if_needed(uid, int(context.args[0]))
 
+    channels = get_force_channels()
     await update.message.reply_text(
-        welcome_text(uid),
+        join_text(),
         parse_mode="HTML",
-        reply_markup=user_menu(uid),
+        reply_markup=kb_join_channels(channels),
         disable_web_page_preview=True,
     )
 
@@ -465,126 +449,56 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     upsert_user(uid, update.effective_user.username, update.effective_user.first_name)
-
-    u = get_user(uid) or {}
-    state = u.get("state")
-    state_data = u.get("state_data")
-    if isinstance(state_data, str):
-        try:
-            state_data = json.loads(state_data)
-        except Exception:
-            state_data = {}
-
-    text = (update.message.text or "").strip()
-
-    if is_admin(uid) and state == "admin_set_channels":
-        lines = [x.strip() for x in text.splitlines() if x.strip()]
-        if len(lines) < 5:
-            await update.message.reply_text(
-                "Send 5 lines:\n<code>@ch1\n@ch2\n@ch3\n@ch4\n@ch5</code>",
-                parse_mode="HTML",
-            )
-            return
-        chs = []
-        for ln in lines[:5]:
-            if not ln.startswith("@"):
-                ln = "@" + ln
-            chs.append(ln)
-        set_setting("force_join_channels", chs)
-        clear_state(uid)
-        await update.message.reply_text("✅ Channels updated!", parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    if is_admin(uid) and state == "admin_set_rule_points":
-        t = (state_data or {}).get("type")
-        num = "".join([c for c in text if c.isdigit()])
-        if not num or t not in ["500", "1000", "2000", "4000"]:
-            await update.message.reply_text("Send a number only (example: 3)")
-            return
-        rules = get_redeem_rules()
-        rules[t]["points"] = max(0, int(num))
-        set_setting("redeem_rules", rules)
-        clear_state(uid)
-        await update.message.reply_text("✅ Points updated!", parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    if is_admin(uid) and state == "admin_add_coupons":
-        t = (state_data or {}).get("type")
-        codes = [x.strip() for x in text.splitlines() if x.strip()]
-        if t not in ["500", "1000", "2000", "4000"] or not codes:
-            await update.message.reply_text("Send coupon codes (one per line).")
-            return
-        n = add_coupons(t, codes)
-        clear_state(uid)
-        await update.message.reply_text(f"✅ Added {n} coupons to {coupon_label(t)}", parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    if is_admin(uid) and state == "admin_remove_coupons":
-        t = (state_data or {}).get("type")
-        num = "".join([c for c in text if c.isdigit()])
-        if t not in ["500", "1000", "2000", "4000"] or not num:
-            await update.message.reply_text("Send number (example: 10)")
-            return
-        deleted = remove_unused_coupons(t, max(1, int(num)))
-        clear_state(uid)
-        await update.message.reply_text(f"✅ Removed {deleted} coupons from {coupon_label(t)}", parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    await update.message.reply_text("Choose an option 👇", reply_markup=user_menu(uid))
+    await update.message.reply_text("Use buttons 👇", reply_markup=user_menu(uid))
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     upsert_user(uid, q.from_user.username, q.from_user.first_name)
-
     data = q.data or ""
     await q.answer()
 
-    if data == "back_menu":
-        await q.edit_message_text(welcome_text(uid), parse_mode="HTML", reply_markup=user_menu(uid))
-        return
-
-    if data == "verify":
+    if data == "joined_all":
         all_joined, channels, _ = await check_force_join(context.application, uid)
-        token = create_verify_token(uid)
-        verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
-
         if not all_joined:
             await q.edit_message_text(
-                "⚠️ <b>Join all channels first.</b>\n\nThen verify on website and click Check Verification.",
+                "⚠️ <b>You still haven't joined all channels</b>\n\nPlease join and click again.",
                 parse_mode="HTML",
-                reply_markup=join_verify_kb(channels, verify_url),
+                reply_markup=kb_join_channels(channels),
             )
             return
 
-        await q.edit_message_text(
-            "✅ <b>Joined all channels!</b>\n\nNow verify on website and then click Check Verification.",
+        token = create_verify_token(uid)
+        verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
+
+        await context.application.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=verify_text(),
             parse_mode="HTML",
-            reply_markup=join_verify_kb(channels, verify_url),
+            reply_markup=kb_verify_actions(verify_url),
+            disable_web_page_preview=True,
         )
         return
 
     if data == "check_verification":
         all_joined, channels, _ = await check_force_join(context.application, uid)
-
-        token = create_verify_token(uid)
-        verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
-
         if not all_joined:
             await q.edit_message_text(
-                "⚠️ <b>You haven't joined all channels.</b>\n\nJoin all and try again.",
+                "⚠️ <b>You haven't joined all channels.</b>\n\nJoin and click Joined All Channels.",
                 parse_mode="HTML",
-                reply_markup=join_verify_kb(channels, verify_url),
+                reply_markup=kb_join_channels(channels),
             )
             return
 
         u = get_user(uid) or {}
         if not u.get("verified"):
+            token = create_verify_token(uid)
+            verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
             await q.edit_message_text(
-                "❌ <b>Not verified yet.</b>\n\nVerify on website then click Check Verification.",
+                "❌ <b>Not verified yet.</b>\n\nClick Verify and complete it, then click Check Verification.",
                 parse_mode="HTML",
-                reply_markup=join_verify_kb(channels, verify_url),
+                reply_markup=kb_verify_actions(verify_url),
             )
             return
 
@@ -599,11 +513,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await q.edit_message_text(
-            "✅ <b>Verification Successful!</b>\n\nNow you can use the bot.",
-            parse_mode="HTML",
-            reply_markup=user_menu(uid),
-        )
+        await q.edit_message_text(welcome_text(uid), parse_mode="HTML", reply_markup=user_menu(uid))
         return
 
     if data == "stats":
@@ -615,169 +525,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"🔗 <b>Your Referral Link</b>\n\n<code>{link}</code>", parse_mode="HTML", reply_markup=user_menu(uid))
         return
 
-    if data == "leaderboard":
-        rows = db_exec(
-            "select tg_id, username, first_name, referrals, points from users order by referrals desc, points desc limit 10",
-            fetchall=True,
-        ) or []
-        txt = "🏆 <b>Top 10 Leaderboard</b>\n\n"
-        if not rows:
-            txt += "No users yet."
-        else:
-            for i, r in enumerate(rows, start=1):
-                name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else str(r["tg_id"]))
-                txt += f"{i}) <b>{name}</b> — Referrals: <b>{int(r.get('referrals', 0))}</b>\n"
-        await q.edit_message_text(txt, parse_mode="HTML", reply_markup=user_menu(uid))
-        return
-
-    if data == "redeem_menu":
-        u = get_user(uid) or {}
-        if not u.get("verified"):
-            await q.answer("Verify first", show_alert=True)
-            return
-
-        rules = get_redeem_rules()
-        stock = stock_counts()
-        pts = int(u.get("points", 0))
-
-        txt = "🎟️ <b>Redeem Coupons</b>\n\n"
-        txt += f"Your Points: <b>{pts}</b>\n\n"
-        for t in ["500", "1000", "2000", "4000"]:
-            txt += f"• {coupon_label(t)} — Need <b>{int(rules[t]['points'])}</b> — Stock <b>{stock.get(t, 0)}</b>\n"
-
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("500 off 500", callback_data="redeem:500"),
-             InlineKeyboardButton("1000 off 1000", callback_data="redeem:1000")],
-            [InlineKeyboardButton("2000 off 2000", callback_data="redeem:2000"),
-             InlineKeyboardButton("4000 off 4000", callback_data="redeem:4000")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back_menu")],
-        ])
-        await q.edit_message_text(txt, parse_mode="HTML", reply_markup=kb)
-        return
-
-    if data.startswith("redeem:"):
-        t = data.split(":", 1)[1]
-        ok, code, spent = redeem_coupon(uid, t)
-        if not ok:
-            await q.answer(code, show_alert=True)
-            return
-
-        await q.edit_message_text(
-            "🎉 <b>Congratulations!</b>\n\n"
-            f"Your Coupon: <code>{code}</code>\n"
-            f"Points spent: <b>{spent}</b>",
-            parse_mode="HTML",
-            reply_markup=user_menu(uid),
-        )
-
-        # notify admins
-        u = get_user(uid) or {}
-        for aid in ADMIN_IDS:
-            try:
-                await context.application.bot.send_message(
-                    chat_id=aid,
-                    text=f"🎟️ <b>Redeem</b>\nUser: <b>{safe_name(u)}</b> (<code>{uid}</code>)\nType: <b>{coupon_label(t)}</b>\nSpent: <b>{spent}</b>",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-        return
-
-    # ---------------- Admin Panel ----------------
-    if data == "admin_panel":
-        if not is_admin(uid):
-            await q.answer("Not allowed", show_alert=True)
-            return
-        await q.edit_message_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    if data == "admin_channels" and is_admin(uid):
-        set_state(uid, "admin_set_channels", {})
-        await q.edit_message_text(
-            "📢 Send 5 channels (5 lines):\n<code>@ch1\n@ch2\n@ch3\n@ch4\n@ch5</code>",
-            parse_mode="HTML",
-            reply_markup=admin_panel_kb(),
-        )
-        return
-
-    if data == "admin_rules" and is_admin(uid):
-        await q.edit_message_text(
-            "Select coupon type to change points:",
-            parse_mode="HTML",
-            reply_markup=admin_choose_type_kb("admin_rule"),
-        )
-        return
-
-    if data.startswith("admin_rule:") and is_admin(uid):
-        t = data.split(":", 1)[1]
-        set_state(uid, "admin_set_rule_points", {"type": t})
-        await q.edit_message_text(
-            f"Send new points for {coupon_label(t)} (example: <code>3</code>)",
-            parse_mode="HTML",
-            reply_markup=admin_panel_kb(),
-        )
-        return
-
-    if data == "admin_add_coupons" and is_admin(uid):
-        await q.edit_message_text("Select coupon type to add:", parse_mode="HTML", reply_markup=admin_choose_type_kb("admin_add"))
-        return
-
-    if data.startswith("admin_add:") and is_admin(uid):
-        t = data.split(":", 1)[1]
-        set_state(uid, "admin_add_coupons", {"type": t})
-        await q.edit_message_text(
-            f"Send codes for {coupon_label(t)} (one per line):",
-            parse_mode="HTML",
-            reply_markup=admin_panel_kb(),
-        )
-        return
-
-    if data == "admin_remove_coupons" and is_admin(uid):
-        await q.edit_message_text("Select coupon type to remove:", parse_mode="HTML", reply_markup=admin_choose_type_kb("admin_rem"))
-        return
-
-    if data.startswith("admin_rem:") and is_admin(uid):
-        t = data.split(":", 1)[1]
-        set_state(uid, "admin_remove_coupons", {"type": t})
-        await q.edit_message_text(
-            f"Send how many unused coupons to remove from {coupon_label(t)} (example: 10):",
-            parse_mode="HTML",
-            reply_markup=admin_panel_kb(),
-        )
-        return
-
-    if data == "admin_stock" and is_admin(uid):
-        stock = stock_counts()
-        txt = "📦 <b>Stock</b>\n\n"
-        for t in ["500", "1000", "2000", "4000"]:
-            txt += f"• {coupon_label(t)} = <b>{stock.get(t, 0)}</b>\n"
-        await q.edit_message_text(txt, parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
-    if data == "admin_redeems" and is_admin(uid):
-        rows = db_exec(
-            """
-            select r.tg_id, r.coupon_type, r.points_spent, u.username, u.first_name
-            from redeems r
-            left join users u on u.tg_id=r.tg_id
-            order by r.id desc
-            limit 20
-            """,
-            fetchall=True,
-        ) or []
-        txt = "📜 <b>Last 20 Redeems</b>\n\n"
-        if not rows:
-            txt += "No redeems yet."
-        else:
-            for r in rows:
-                name = r.get("first_name") or (("@" + r["username"]) if r.get("username") else str(r["tg_id"]))
-                txt += f"• <b>{name}</b> — {coupon_label(str(r['coupon_type']))} — spent <b>{int(r['points_spent'])}</b>\n"
-        await q.edit_message_text(txt, parse_mode="HTML", reply_markup=admin_panel_kb())
-        return
-
 
 # =========================================================
-# FastAPI app + routes
+# FastAPI app
 # =========================================================
 app = FastAPI()
 tg_app: Optional[Application] = None
@@ -849,16 +599,13 @@ VERIFY_HTML = """<!doctype html>
 </html>
 """
 
-
 @app.get("/", response_class=PlainTextResponse)
 def health():
     return "OK"
 
-
 @app.get("/verify", response_class=HTMLResponse)
 def verify_page(token: str = ""):
     return HTMLResponse(VERIFY_HTML)
-
 
 @app.post("/api/verify")
 async def api_verify(req: Request):
@@ -868,19 +615,13 @@ async def api_verify(req: Request):
     ok, message, tg_id = verify_on_web(token, device_id)
     return JSONResponse({"ok": ok, "message": message, "tg_id": tg_id})
 
-
 @app.post("/telegram")
 async def telegram_webhook(req: Request):
-    # IMPORTANT: Return quickly. Process update via PTB.
     data = await req.json()
     update = Update.de_json(data, tg_app.bot)  # type: ignore
     await tg_app.process_update(update)        # type: ignore
     return JSONResponse({"ok": True})
 
-
-# =========================================================
-# startup/shutdown
-# =========================================================
 async def build_telegram():
     global tg_app
     tg_app = Application.builder().token(BOT_TOKEN).build()
@@ -889,15 +630,12 @@ async def build_telegram():
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     await tg_app.initialize()
-    # set webhook to correct URL
     await tg_app.bot.set_webhook(f"{PUBLIC_BASE_URL}/telegram")
     await tg_app.start()
-
 
 @app.on_event("startup")
 async def on_startup():
     await build_telegram()
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -905,10 +643,6 @@ async def on_shutdown():
         await tg_app.stop()
         await tg_app.shutdown()
 
-
-# =========================================================
-# IMPORTANT FIX: uvicorn.run(app, ...) not "app:app"
-# =========================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
